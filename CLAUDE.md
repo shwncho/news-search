@@ -1,4 +1,4 @@
-# CLAUDE.md — Demo 프로젝트 아키텍처 가이드
+# CLAUDE.md
 
 ## 프로젝트 개요
 
@@ -7,10 +7,10 @@
 - **아키텍처**: DDD + Layered Clean Architecture
 - **빌드**: Gradle (Kotlin DSL) / **린터**: ktlint 12.x
 
-코드 작성 컨벤션은 `.claude/skills/` 하위 파일을 참조한다:
-- Kotlin 코드 스타일 → `.claude/skills/kotlin-conventions.md`
-- Spring 컴포넌트 설계 → `.claude/skills/spring-conventions.md`
-- 테스트 작성 규칙 → `.claude/skills/testing-conventions.md`
+코드 작성 컨벤션은 `.claude/rules/` 하위 파일을 참조한다:
+- Kotlin 코드 스타일 → `.claude/rules/kotlin-conventions.md`
+- Spring 컴포넌트 설계 → `.claude/rules/spring-conventions.md`
+- 테스트 작성 규칙 → `.claude/rules/testing-conventions.md`
 
 ---
 
@@ -24,7 +24,7 @@ src/main/kotlin/com/example/demo/
 │   ├── exception/      # Domain Exception
 │   └── repository/     # Repository 인터페이스 (도메인 레이어 소유)
 ├── application/
-│   ├── dto/            # Command, Query, Response DTO 중앙 관리
+│   ├── dto/            # Request, Response DTO 중앙 관리
 │   └── service/        # Application Service
 ├── presentation/
 │   └── {domain}/       # Controller (DTO는 application/dto 직접 사용)
@@ -58,16 +58,16 @@ domain        →  없음 (순수 Kotlin, 외부 의존 금지)
 
 ## 레이어 간 데이터 전달 규칙
 
-1. **Presentation → Application**: `application/dto`의 Command / Query DTO로 전달
+1. **Presentation → Application**: `application/dto`의 Request DTO로 전달
 2. **Application → Presentation**: `application/dto`의 Response DTO로 반환 (도메인 객체 직접 노출 금지)
 3. **Application → Domain**: 도메인 객체 및 Value Object 직접 사용
 4. **Infrastructure → Domain**: JPA Entity ↔ Domain 객체 변환은 Infrastructure 내부에서만 수행
 
 ```
 HTTP Request
-    ↓ (Command/Query DTO)
+    ↓ (Request DTO)
 Controller
-    ↓ (Command/Query DTO)
+    ↓ (Request DTO)
 Application Service
     ↓ (Domain Object / Value Object)
 Domain Model ←→ Repository Interface
@@ -84,10 +84,11 @@ Controller
 
 ### DTO 배치 원칙
 
-- 모든 Command, Query, Response DTO는 `application/dto/`에 위치
+- 모든 Request, Response DTO는 `application/dto/`에 위치
 - `presentation/` 레이어에 별도 DTO 클래스 생성 금지
+- DTO 네이밍: `{Action}Request` / `{Action}Response` (예: `CreateOrderRequest`, `CreateOrderResponse`)
 - Response DTO는 `companion object { fun from(domain) }` 패턴으로 변환
-- Command DTO는 입력 검증 어노테이션(`@field:NotBlank` 등) 포함
+- Request DTO는 입력 검증 어노테이션(`@field:NotBlank` 등) 포함
 
 ---
 
@@ -96,62 +97,26 @@ Controller
 ### Aggregate
 
 - Aggregate Root만 외부에서 직접 접근; 내부 Entity는 Root를 통해서만 조작
-- `private constructor` + `companion object { fun create(...) }` 팩토리 패턴 강제
+- `private constructor` + `companion object`의 `create` / `reconstruct` 팩토리 메서드 패턴 강제
+  - `create`: 신규 생성 (불변식 검증, Domain Event 발행)
+  - `reconstruct`: 영속성 복원 (검증·이벤트 없이 상태만 재구성)
 - 생성/변경 시 `require`·`check`로 불변식 검증
 - 내부 컬렉션은 외부에 mutable하게 노출 금지 (`List` 타입으로만 공개)
 - Aggregate 간 참조는 ID(Value Object)로만 — 다른 Aggregate 객체를 직접 참조 금지
 - 하나의 트랜잭션에서 하나의 Aggregate만 수정
 
-```kotlin
-class Order private constructor(
-    val id: OrderId,
-    val customerId: CustomerId,
-    private val _items: MutableList<OrderItem> = mutableListOf(),
-) {
-    val items: List<OrderItem> get() = _items.toList()
-
-    companion object {
-        fun create(customerId: CustomerId): Order =
-            Order(id = OrderId(UUID.randomUUID()), customerId = customerId)
-    }
-
-    fun addItem(productId: ProductId, quantity: Int, price: Money) {
-        require(quantity > 0) { "수량은 0보다 커야 합니다" }
-        _items.add(OrderItem(productId, quantity, price))
-    }
-}
-```
-
 ### Value Object
 
 - 동등성이 값으로 결정되는 개념에 사용
 - 반드시 불변(`val` 필드만)
-- 식별자는 `@JvmInline value class`로, 복합 VO는 `data class`로
-
-```kotlin
-@JvmInline
-value class OrderId(val value: UUID) {
-    companion object {
-        fun generate() = OrderId(UUID.randomUUID())
-        fun of(value: String) = OrderId(UUID.fromString(value))
-    }
-}
-
-data class Money(val amount: BigDecimal, val currency: Currency)
-```
+- 단일 식별자는 `@JvmInline value class`로, 복합 값은 `data class`로
 
 ### Domain Event
 
 - 도메인 레이어(`domain/event/`)에서 정의
 - `DomainEvent` 마커 인터페이스 구현
 - Aggregate 내부에서 이벤트를 생성하고 Application Service에서 발행
-
-```kotlin
-data class OrderPlacedEvent(
-    val orderId: OrderId,
-    val occurredAt: Instant = Instant.now(),
-) : DomainEvent
-```
+- 실제 Domain Event가 존재할 때만 `DomainEvent` 마커 인터페이스 및 이벤트 클래스 생성
 
 ### Repository 인터페이스
 
@@ -167,25 +132,6 @@ data class OrderPlacedEvent(
 2. **JPA Entity는 Infrastructure 전용**: `domain/model/`의 클래스와 별개로 `infrastructure/persistence/`에 JPA Entity 별도 정의
 3. **변환 책임은 Infrastructure**: `JpaEntity.toDomain()` / `JpaEntity.from(domain)` 패턴으로 Infrastructure 내에서만 변환
 4. **Repository 인터페이스는 Domain이 소유**: Application Service는 `domain/repository/` 인터페이스에만 의존, Infrastructure 구현체를 직접 참조하지 않음
-
-```kotlin
-// infrastructure/persistence/order/OrderJpaEntity.kt
-@Entity
-@Table(name = "orders")
-class OrderJpaEntity(
-    @Id val id: UUID,
-    val customerId: UUID,
-) {
-    fun toDomain(): Order = Order.reconstruct(OrderId(id), CustomerId(customerId))
-
-    companion object {
-        fun from(order: Order) = OrderJpaEntity(
-            id = order.id.value,
-            customerId = order.customerId.value,
-        )
-    }
-}
-```
 
 ---
 
